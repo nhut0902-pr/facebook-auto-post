@@ -1,4 +1,7 @@
 requests
+beautifulsoup4
 feedparser
 google-generativeai
-beautifulsoup4
+fastapi
+uvicorn[standard]
+sqlalchemy
