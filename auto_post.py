@@ -1,3 +1,4 @@
+# auto_post.py
 import os
 import json
 import time
@@ -7,39 +8,31 @@ import requests
 import feedparser
 from bs4 import BeautifulSoup
 
-# ================== CẤU HÌNH CHUNG ==================
+# ========== Config (từ ENV) ==========
 PAGE_ID = os.getenv("PAGE_ID", "").strip()
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# Số bài tối đa sẽ đăng trong mỗi lần chạy (để tránh spam)
 MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "3"))
-
-# Bật/tắt delay giữa các bài (chỉ nên bật khi chạy local/server)
-ENABLE_DELAY = os.getenv("ENABLE_DELAY", "false").lower() in ("1", "true", "yes")
-DELAY_MIN_SEC = int(os.getenv("DELAY_MIN_SEC", str(60 * 60)))       # 1h
-DELAY_MAX_SEC = int(os.getenv("DELAY_MAX_SEC", str(2 * 60 * 60)))   # 2h
-
-# Từ khóa lọc bài
-KEYWORDS = [kw.strip() for kw in os.getenv(
+KEYWORDS = [k.strip() for k in os.getenv(
     "KEYWORDS",
     "AI,Artificial Intelligence,Machine Learning,Deep Learning,ChatGPT,Nvidia,OpenAI,LLM,Generative AI"
-).split(",") if kw.strip()]
+).split(",") if k.strip()]
 
-# Nguồn RSS tin AI (ổn định hơn so với crawl HTML tùy biến)
+ENABLE_DELAY = os.getenv("ENABLE_DELAY", "false").lower() in ("1","true","yes")
+DELAY_MIN_SEC = int(os.getenv("DELAY_MIN_SEC", str(60*60)))    # 1 hour
+DELAY_MAX_SEC = int(os.getenv("DELAY_MAX_SEC", str(2*60*60)))  # 2 hours
+
 RSS_FEEDS = [
-    # Việt Nam
     "https://vnexpress.net/rss/so-hoa.rss",
     "https://vietnamnet.vn/rss/khoa-hoc.rss",
-    # Quốc tế
     "https://www.theverge.com/artificial-intelligence/rss/index.xml",
     "https://venturebeat.com/category/ai/feed/",
-    "https://www.wired.com/feed/tag/artificial-intelligence/latest/rss"  # có thể ít bài
 ]
 
 LOG_FILE = "post_log.json"
 
-# ================== TIỆN ÍCH ==================
+# ========== Utilities ==========
 def load_log():
     if os.path.exists(LOG_FILE):
         try:
@@ -51,35 +44,55 @@ def load_log():
 
 def save_log(logs):
     with open(LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(logs, f, indent=2, ensure_ascii=False)
+        json.dump(logs, f, ensure_ascii=False, indent=2)
 
-def is_already_posted(url, logs):
-    for item in logs:
-        if item.get("url") == url and item.get("status") == "success":
-            return True
-    return False
-
-def add_log(title, url, status, extra=None):
+def add_log(title, url, status, resp=None):
     logs = load_log()
-    entry = {
+    logs.append({
         "title": title,
         "url": url,
         "status": status,
-        "time": datetime.datetime.now().isoformat()
-    }
-    if extra:
-        entry.update(extra)
-    logs.append(entry)
+        "time": datetime.datetime.utcnow().isoformat(),
+        "response": resp
+    })
     save_log(logs)
 
-def safe_get(url, timeout=12):
+def is_already_posted(url):
+    logs = load_log()
+    for e in logs:
+        if e.get("url") == url and e.get("status") == "success":
+            return True
+    return False
+
+def safe_get(url, timeout=10):
     try:
-        return requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        return requests.get(url, timeout=timeout, headers={"User-Agent":"Mozilla/5.0"})
     except Exception:
         return None
 
+# ========== Fetch articles (RSS) ==========
+def fetch_from_feeds():
+    articles = []
+    for url in RSS_FEEDS:
+        try:
+            feed = feedparser.parse(url)
+            for e in feed.entries[:10]:
+                title = getattr(e, "title", "") or ""
+                link  = getattr(e, "link", "") or ""
+                summary = (getattr(e, "summary", "") or "").strip()
+                if title and link:
+                    articles.append({"title": title.strip(), "url": link.strip(), "summary": summary})
+        except Exception as ex:
+            print("Feed error", url, ex)
+    # dedupe by url
+    seen = set(); uniq = []
+    for a in articles:
+        if a["url"] not in seen:
+            seen.add(a["url"]); uniq.append(a)
+    return uniq
+
+# ========== Content helpers ==========
 def extract_og_image(article_url):
-    """Ưu tiên ảnh từ thẻ og:image của trang bài viết."""
     resp = safe_get(article_url)
     if not resp or resp.status_code != 200:
         return None
@@ -87,190 +100,125 @@ def extract_og_image(article_url):
     og = soup.find("meta", property="og:image")
     if og and og.get("content"):
         return og["content"].strip()
-    # fallback: lấy ảnh đầu tiên trong bài (nếu có)
-    img = soup.find("img")
-    if img and (img.get("src") or img.get("data-src")):
-        return (img.get("src") or img.get("data-src")).strip()
+    # fallback: first meaningful <img>
+    imgs = soup.find_all("img")
+    for img in imgs:
+        src = img.get("data-src") or img.get("src")
+        if src and src.startswith("http"):
+            return src
     return None
 
-def extract_meta_description(article_url):
-    """Lấy mô tả ngắn (để hỗ trợ LLM tóm tắt tốt hơn)."""
+def extract_text_summary(article_url, max_chars=800):
     resp = safe_get(article_url)
     if not resp or resp.status_code != 200:
         return ""
     soup = BeautifulSoup(resp.text, "html.parser")
-    m = soup.find("meta", attrs={"name": "description"})
-    if m and m.get("content"):
-        return m["content"].strip()
-    og_desc = soup.find("meta", property="og:description")
-    if og_desc and og_desc.get("content"):
-        return og_desc["content"].strip()
-    # fallback: lấy vài dòng text đầu
-    text = soup.get_text(separator=" ", strip=True)
-    return text[:500]
+    meta = soup.find("meta", attrs={"name":"description"})
+    if meta and meta.get("content"):
+        return meta["content"].strip()[:max_chars]
+    ogd = soup.find("meta", property="og:description")
+    if ogd and ogd.get("content"):
+        return ogd["content"].strip()[:max_chars]
+    # fallback: gather first paragraphs
+    paragraphs = soup.find_all("p")
+    text = " ".join([p.get_text(" ", strip=True) for p in paragraphs[:6]])
+    return text[:max_chars]
 
-def contains_keyword(title, summary):
-    blob = f"{title} {summary}".lower()
-    return any(kw.lower() in blob for kw in KEYWORDS)
-
-def unique_by_url(items):
-    seen = set()
-    out = []
-    for it in items:
-        u = it["url"]
-        if u not in seen:
-            seen.add(u)
-            out.append(it)
-    return out
-
-# ================== LẤY TIN TỪ RSS ==================
-def fetch_from_feeds():
-    print("📰 Đang lấy tin từ RSS...")
-    articles = []
-    for feed_url in RSS_FEEDS:
-        try:
-            feed = feedparser.parse(feed_url)
-            for e in feed.entries[:10]:  # tối đa 10 bài/nguồn
-                title = (getattr(e, "title", "") or "").strip()
-                link = (getattr(e, "link", "") or "").strip()
-                summary = (getattr(e, "summary", "") or "").strip()
-                if not title or not link:
-                    continue
-                articles.append({"title": title, "url": link, "summary": summary})
-        except Exception as ex:
-            print(f"⚠️ Lỗi đọc feed {feed_url}: {ex}")
-    articles = unique_by_url(articles)
-    print(f"🔎 Tổng thu thập: {len(articles)} bài.")
-    return articles
-
-# ================== GEMINI: SINH CAPTION ==================
-def generate_caption_with_gemini(title, url, context_text):
+# ========== Gemini caption ==========
+def generate_caption(title, url, context_text):
     if not GEMINI_API_KEY:
-        # fallback khi không có API key
-        base = f"{title}\n\nĐọc thêm: {url}"
-        hashtags = " ".join(sorted({f"#{kw.replace(' ','')}" for kw in ["AI","Tech"]}))
-        return f"{base}\n\n{hashtags}"
-
+        # fallback simple caption
+        hashtags = " ".join(["#AI","#Tech"])
+        return f"{title}\n\nĐọc thêm: {url}\n\n{hashtags}"
     try:
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel("gemini-1.5-flash")
-
-        # Chuẩn bị hashtag từ KEYWORDS (gọn tối đa 3-5 cái)
-        core_tags = ["AI", "Tech", "MachineLearning", "DeepLearning", "ChatGPT", "Nvidia"]
-        chosen = []
-        lower_blob = (title + " " + context_text).lower()
-        for tag in core_tags:
-            if tag.lower() in lower_blob and len(chosen) < 5:
-                chosen.append(tag)
-        if not chosen:
-            chosen = ["AI", "Tech"]
-        hashtags = " ".join(f"#{t}" for t in chosen)
-
         prompt = (
-            "Bạn là biên tập viên mạng xã hội. Hãy viết caption Facebook ngắn gọn (2–3 câu), "
-            "rõ ràng, hấp dẫn, tóm tắt nội dung bài viết dưới đây. Không quá 600 ký tự. "
-            "Không thêm dấu ngoặc kép ngoài cùng. Kết thúc bằng các hashtag đã gợi ý.\n\n"
-            f"Tiêu đề: {title}\n"
-            f"Mô tả: {context_text[:1200]}\n"
-            f"Link: {url}\n"
-            f"Hashtags: {hashtags}\n"
+            "Bạn là biên tập viên mạng xã hội. Viết caption Facebook 2-3 câu, "
+            "tóm tắt nội dung, hấp dẫn, tiếng Việt. Thêm 2-4 hashtag phù hợp.\n\n"
+            f"Tiêu đề: {title}\nMô tả: {context_text[:1200]}\nLink: {url}\n\nCaption:"
         )
         resp = model.generate_content(prompt)
         text = (resp.text or "").strip()
-        if not text:
-            raise ValueError("Empty caption from Gemini")
-        # đảm bảo có link
         if "http" not in text:
             text = f"{text}\n\nĐọc thêm: {url}"
-        # đảm bảo có hashtags
-        if "#" not in text:
-            text = f"{text}\n\n{hashtags}"
         return text
     except Exception as e:
-        print(f"⚠️ Gemini lỗi: {e}")
-        # fallback
-        base = f"{title}\n\nĐọc thêm: {url}"
-        fallback_tags = " ".join(["#AI", "#Tech"])
-        return f"{base}\n\n{fallback_tags}"
+        print("Gemini error:", e)
+        hashtags = " ".join(["#AI","#Tech"])
+        return f"{title}\n\nĐọc thêm: {url}\n\n{hashtags}"
 
-# ================== ĐĂNG LÊN FACEBOOK ==================
-def post_text(message):
-    url = f"https://graph.facebook.com/{PAGE_ID}/feed"
-    r = requests.post(url, data={"message": message, "access_token": PAGE_ACCESS_TOKEN})
+# ========== Facebook publishing ==========
+def post_photo(image_url, caption):
+    endpoint = f"https://graph.facebook.com/{PAGE_ID}/photos"
+    data = {"url": image_url, "caption": caption, "access_token": PAGE_ACCESS_TOKEN}
+    r = requests.post(endpoint, data=data)
     return r
 
-def post_photo(image_url, caption):
-    url = f"https://graph.facebook.com/{PAGE_ID}/photos"
-    r = requests.post(url, data={"url": image_url, "caption": caption, "access_token": PAGE_ACCESS_TOKEN})
+def post_feed(caption):
+    endpoint = f"https://graph.facebook.com/{PAGE_ID}/feed"
+    data = {"message": caption, "access_token": PAGE_ACCESS_TOKEN}
+    r = requests.post(endpoint, data=data)
     return r
 
 def publish_article(article):
-    title = article["title"]
-    url = article["url"]
+    title = article["title"]; url = article["url"]
+    if is_already_posted(url):
+        print("Skip already posted:", url); return False
 
-    # Lấy mô tả + ảnh cho bài
-    meta_desc = article.get("summary") or extract_meta_description(url) or ""
+    summary_text = article.get("summary") or extract_text_summary(url)
     image_url = extract_og_image(url)
+    caption = generate_caption(title, url, summary_text)
 
-    # Sinh caption bằng Gemini
-    caption = generate_caption_with_gemini(title, url, meta_desc)
-
-    # Đăng bài
     if image_url:
-        resp = post_photo(image_url, caption)
+        r = post_photo(image_url, caption)
     else:
-        resp = post_text(caption)
+        r = post_feed(caption)
 
-    if resp.ok:
-        print(f"✅ Đăng thành công: {title}")
-        add_log(title, url, "success", {"response": safe_json(resp)})
+    try:
+        j = r.json()
+    except Exception:
+        j = {"raw": r.text}
+    if r.ok:
+        print("Posted:", title)
+        add_log(title, url, "success", j)
         return True
     else:
-        print(f"❌ Lỗi khi đăng: {resp.text}")
-        add_log(title, url, "error", {"response": resp.text})
+        print("Post error:", j)
+        add_log(title, url, "error", j)
         return False
 
-def safe_json(resp):
-    try:
-        return resp.json()
-    except Exception:
-        return {"text": resp.text[:500]}
-
-# ================== LUỒNG CHÍNH ==================
+# ========== Main ==========
 def main():
-    # Kiểm tra cấu hình
     if not PAGE_ID or not PAGE_ACCESS_TOKEN:
-        print("❌ Thiếu PAGE_ID hoặc PAGE_ACCESS_TOKEN (biến môi trường).")
+        print("Missing PAGE_ID or PAGE_ACCESS_TOKEN in env.")
         return
 
-    print("📰 Bắt đầu lấy tin và đăng…")
-    logs = load_log()
+    print("Start fetching articles...")
     all_articles = fetch_from_feeds()
+    # filter by keywords
+    selected = []
+    for a in all_articles:
+        blob = (a["title"] + " " + (a.get("summary") or "")).lower()
+        if any(k.lower() in blob for k in KEYWORDS):
+            selected.append(a)
 
-    # Lọc theo từ khóa
-    filtered = [a for a in all_articles if contains_keyword(a["title"], a.get("summary", ""))]
-    print(f"🔍 Sau lọc từ khóa: {len(filtered)} bài.")
+    print(f"Found {len(selected)} articles after keyword filter.")
+    # remove already posted
+    to_post = [a for a in selected if not is_already_posted(a["url"])]
+    print(f"{len(to_post)} not posted yet. Will post up to {MAX_POSTS_PER_RUN}")
 
-    # Loại bỏ bài đã đăng trước đó
-    filtered = [a for a in filtered if not is_already_posted(a["url"], logs)]
-    print(f"🧹 Sau khi loại trùng (đã đăng): {len(filtered)} bài.")
-
-    # Giới hạn số bài đăng mỗi lượt
-    to_post = filtered[:MAX_POSTS_PER_RUN]
-    print(f"🗓️ Sẽ đăng {len(to_post)}/{len(filtered)} bài trong lượt này.")
-
-    for idx, article in enumerate(to_post, start=1):
-        print(f"➡️  [{idx}/{len(to_post)}] {article['title']}")
-        publish_article(article)
-
-        # Delay ngẫu nhiên nếu bật
+    to_post = to_post[:MAX_POSTS_PER_RUN]
+    for idx, art in enumerate(to_post, start=1):
+        print(f"[{idx}/{len(to_post)}] Publishing: {art['title']}")
+        publish_article(art)
         if ENABLE_DELAY and idx < len(to_post):
-            delay = random.randint(DELAY_MIN_SEC, DELAY_MAX_SEC)
-            print(f"⏳ Chờ {delay//60} phút trước bài kế tiếp…")
-            time.sleep(delay)
+            d = random.randint(DELAY_MIN_SEC, DELAY_MAX_SEC)
+            print(f"Sleeping {d//60} minutes before next post...")
+            time.sleep(d)
 
-    print("🏁 Hoàn tất.")
+    print("Done.")
 
 if __name__ == "__main__":
     main()
