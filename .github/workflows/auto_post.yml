@@ -1,15 +1,17 @@
-name: Auto Post to Facebook
+name: Auto Post AI News
 
 on:
   schedule:
-    - cron: "0 1 * * *"   # chạy 8h sáng VN (1h UTC)
-  workflow_dispatch:       # cho phép chạy thủ công
+    # Chạy mỗi 2 tiếng
+    - cron: "0 */2 * * *"
+  workflow_dispatch: # Cho phép chạy thủ công từ GitHub
 
 jobs:
   auto-post:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -18,11 +20,13 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Run auto post
-        run: python auto_post.py
+      - name: Run auto_post.py
         env:
           PAGE_ID: ${{ secrets.PAGE_ID }}
           PAGE_ACCESS_TOKEN: ${{ secrets.PAGE_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python auto_post.py
