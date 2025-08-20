@@ -1,32 +1,30 @@
 name: Auto Post AI News
-
 on:
   schedule:
-    # Chạy mỗi 2 tiếng
     - cron: "0 */2 * * *"
-  workflow_dispatch: # Cho phép chạy thủ công từ GitHub
+  workflow_dispatch:
 
 jobs:
-  auto-post:
+  post:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
+      - uses: actions/checkout@v3
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run auto_post.py
+      - name: Install deps
+        run: pip install --upgrade pip && pip install -r requirements.txt
+      - name: Run auto_post
         env:
           PAGE_ID: ${{ secrets.PAGE_ID }}
           PAGE_ACCESS_TOKEN: ${{ secrets.PAGE_ACCESS_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MAX_POSTS_PER_RUN: 3
+          ENABLE_DELAY: false
         run: python auto_post.py
+      - name: Upload post_log
+        uses: actions/upload-artifact@v4
+        with:
+          name: post_log
+          path: post_log.json
