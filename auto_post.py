@@ -1,64 +1,70 @@
 import os
 import requests
-import feedparser
-import google.generativeai as genai
+from bs4 import BeautifulSoup
 
-# ==== Cấu hình ====
+# 🔑 Lấy thông tin từ biến môi trường
 PAGE_ID = os.getenv("PAGE_ID")
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 
-# RSS feed về AI
-RSS_FEEDS = [
-    "https://vnexpress.net/rss/so-hoa.rss",
-    "https://www.theverge.com/artificial-intelligence/rss/index.xml",
-    "https://venturebeat.com/category/ai/feed/",
-]
+# Trang báo để lấy tin tức AI
+NEWS_URL = "https://vnexpress.net/tri-tue-nhan-tao"
 
-# ==== Hàm lấy tin tức AI ====
-def get_latest_news():
-    print("📰 Đang lấy tin tức AI...")
-    news_items = []
-    for feed_url in RSS_FEEDS:
-        feed = feedparser.parse(feed_url)
-        for entry in feed.entries[:5]:  # lấy 5 tin từ mỗi nguồn
-            news_items.append({
-                "title": entry.title,
-                "url": entry.link
-            })
-    print(f"📰 Tìm thấy {len(news_items)} bài AI.")
-    return news_items
+def get_ai_news():
+    """Lấy danh sách bài viết AI (tiêu đề, link, ảnh)."""
+    resp = requests.get(NEWS_URL, timeout=10)
+    soup = BeautifulSoup(resp.text, "html.parser")
 
-# ==== Tóm tắt bằng Gemini ====
-def summarize_with_gemini(title, url):
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    prompt = f"Tóm tắt ngắn gọn tin tức sau:\nTiêu đề: {title}\nNguồn: {url}"
-    try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"❌ Lỗi Gemini: {e}")
-        return title  # fallback: chỉ đăng tiêu đề
+    articles = []
+    for item in soup.select("article a[href]")[:5]:  # lấy 5 bài đầu tiên
+        link = item["href"]
+        title = item.get_text(strip=True)
 
-# ==== Đăng lên Facebook ====
-def post_to_facebook(message):
-    url = f"https://graph.facebook.com/{PAGE_ID}/feed"
-    params = {
-        "message": message,
-        "access_token": PAGE_ACCESS_TOKEN
-    }
-    response = requests.post(url, params=params)
-    if response.status_code == 200:
-        print("✅ Đăng thành công!")
+        if not title or not link.startswith("http"):
+            continue
+
+        # Lấy ảnh từ thẻ og:image trong từng bài
+        try:
+            sub_html = requests.get(link, timeout=10).text
+            sub_soup = BeautifulSoup(sub_html, "html.parser")
+            og_img = sub_soup.find("meta", property="og:image")
+            image_url = og_img["content"] if og_img else None
+        except:
+            image_url = None
+
+        articles.append({
+            "title": title,
+            "link": link,
+            "image": image_url
+        })
+    return articles
+
+def post_to_facebook(article):
+    """Đăng bài viết kèm ảnh lên Fanpage."""
+    if article["image"]:
+        url = f"https://graph.facebook.com/{PAGE_ID}/photos"
+        payload = {
+            "url": article["image"],
+            "caption": f"{article['title']}\n\nĐọc thêm: {article['link']}",
+            "access_token": ACCESS_TOKEN
+        }
     else:
-        print(f"❌ Lỗi khi đăng: {response.text}")
+        url = f"https://graph.facebook.com/{PAGE_ID}/feed"
+        payload = {
+            "message": f"{article['title']}\n\nĐọc thêm: {article['link']}",
+            "access_token": ACCESS_TOKEN
+        }
 
-# ==== Main ====
+    r = requests.post(url, data=payload)
+    print("✅ Đăng thành công:", r.json() if r.ok else r.text)
+
+def main():
+    print("📰 Đang lấy tin tức AI...")
+    articles = get_ai_news()
+    print(f"🔎 Tìm thấy {len(articles)} bài.")
+
+    for art in articles:
+        print(f"📌 Đăng: {art['title']}")
+        post_to_facebook(art)
+
 if __name__ == "__main__":
-    news_list = get_latest_news()
-    for news in news_list:
-        print(f"🔎 Xử lý: {news['title']}")
-        summary = summarize_with_gemini(news["title"], news["url"])
-        post_message = f"{summary}\n\nNguồn: {news['url']}"
-        post_to_facebook(post_message)
+    main()
