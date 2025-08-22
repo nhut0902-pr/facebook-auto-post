@@ -26,8 +26,8 @@ DELAY_MAX_SEC = int(os.getenv("DELAY_MAX_SEC", str(2*60*60)))  # 2 hours
 RSS_FEEDS = [
     "https://vnexpress.net/rss/so-hoa.rss",
     "https://vietnamnet.vn/rss/khoa-hoc.rss",
-    "https://www.theverge.com/artificial-intelligence/rss/index.xml",
-    "https://venturebeat.com/category/ai/feed/",
+    "https://www.24h.com.vn/cong-nghe-ai-c1101.html",
+    "https://znews.vn/cong-nghe.html",
 ]
 
 LOG_FILE = "post_log.json"
