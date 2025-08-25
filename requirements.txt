@@ -7,3 +7,4 @@ PyYAML>=6.0
 python-dateutil>=2.9.0
 schedule>=1.1.0
 newspaper3k
+lxml_html_clean
