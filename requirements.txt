@@ -1,7 +1,0 @@
-requests
-beautifulsoup4
-feedparser
-google-generativeai
-fastapi
-uvicorn[standard]
-sqlalchemy
