@@ -496,4 +496,13 @@ def main(argv=None):
         log.info("Exiting scheduler loop.")
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    logging.info("Bắt đầu chạy script auto_fb_post.py...")
+
+    try:
+        main()
+        logging.info("Hoàn tất đăng bài.")
+    except Exception as e:
+        logging.error(f"Lỗi trong quá trình chạy: {e}", exc_info=True)
     main()
