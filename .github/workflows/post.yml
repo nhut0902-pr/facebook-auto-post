@@ -1,0 +1,35 @@
+name: Auto Facebook Poster
+
+on:
+  schedule:
+    # Chạy 4 tiếng/lần (UTC). VN là UTC+7 => khoảng 07:00, 11:00, 15:00, 19:00, 23:00, 03:00 VN
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run poster
+        env:
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          MAX_POSTS_PER_RUN: "2"
+          LANG: "vi"
+        run: |
+          python auto_fb_post.py
