@@ -2,8 +2,7 @@ name: Auto Facebook Poster
 
 on:
   schedule:
-    # Chạy 4 tiếng/lần (UTC). VN là UTC+7 => khoảng 07:00, 11:00, 15:00, 19:00, 23:00, 03:00 VN
-    - cron: "0 */4 * * *"
+    - cron: "0 */4 * * *"   # 4 tiếng/lần (UTC)
   workflow_dispatch:
 
 jobs:
@@ -29,7 +28,8 @@ jobs:
           FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
           FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-          MAX_POSTS_PER_RUN: "2"
+          MAX_POSTS_PER_RUN: "3"
           LANG: "vi"
+          USE_FULLTEXT_FOR_SUMMARY: "false"
         run: |
           python auto_fb_post.py
