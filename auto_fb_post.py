@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Auto Facebook Poster — RSS -> Full article crawler (newspaper3k + BeautifulSoup fallback),
-multi-site (có VnExpress), dedupe, chọn ảnh (og:image, <img>, Unsplash fallback),
-đăng lên Facebook Page (link/ảnh). Chạy một lần rồi thoát.
+Auto Facebook Poster — Smart Sources (RSS or HTML auto-detect).
+- Crawl danh sách từ từng nguồn (RSS hoặc HTML).
+- Lấy full article (newspaper3k > BeautifulSoup + domain selectors).
+- Ảnh: og:image / <img>, fallback Unsplash (có kiểm tra quota).
+- Chống trùng (posted_links.json), giới hạn per-run & per-source.
+- Lọc theo từ khóa, lọc bài mới (<=24h).
+- Đăng lên Facebook Page (link/ảnh).
+- One-shot: chạy xong thoát (phù hợp CI/CD).
 
 Yêu cầu:
 - .env: FACEBOOK_PAGE_ID, FACEBOOK_PAGE_ACCESS_TOKEN, (tùy chọn) UNSPLASH_ACCESS_KEY
-- sources.yml: danh sách RSS và (tùy chọn) danh mục HTML
-- requirements.txt: xem file kèm theo
+- sources.yml: danh sách sources + keywords
+- requirements: requests, feedparser, beautifulsoup4, lxml, PyYAML, python-dateutil, newspaper3k, python-dotenv
 
 Chạy:
     python auto_fb_post.py --max 3
@@ -20,7 +25,7 @@ import json
 import time
 import logging
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urljoin
 
 import requests
@@ -48,9 +53,8 @@ LANG = os.getenv("LANG", "vi")
 MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "3"))
 MAX_POSTS_PER_SOURCE = int(os.getenv("MAX_POSTS_PER_SOURCE", "2"))
 USE_FULLTEXT_FOR_SUMMARY = os.getenv("USE_FULLTEXT_FOR_SUMMARY", "true").lower() == "true"
-SUMMARY_MAX_LEN = int(os.getenv("SUMMARY_MAX_LEN", "700"))  # caption Facebook: 63k; ta tóm lược vừa phải
+SUMMARY_MAX_LEN = int(os.getenv("SUMMARY_MAX_LEN", "700"))
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.8"))
-
 UNSPLASH_MIN_REMAINING = int(os.getenv("UNSPLASH_MIN_REMAINING", "5"))
 
 # File paths
@@ -60,7 +64,7 @@ POSTED_FILE = os.getenv("POSTED_FILE", os.path.join(THIS_DIR, "posted_links.json
 LOG_FILE = os.getenv("LOG_FILE", os.path.join(THIS_DIR, "log.txt"))
 
 # HTTP
-USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (compatible; AutoFBPoster/2.1)")
+USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (compatible; AutoFBPoster/3.0)")
 HEADERS = {"User-Agent": USER_AGENT}
 GRAPH_BASE = "https://graph.facebook.com/v19.0"
 
@@ -102,10 +106,9 @@ def load_sources(path: str = SOURCES_FILE):
         raise FileNotFoundError(f"{path} not found.")
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    feeds = cfg.get("feeds", []) or []
-    html_sites = cfg.get("html_sites", []) or []
+    sources = cfg.get("sources", []) or []
     keywords = [k.lower() for k in (cfg.get("keywords") or [])]
-    return feeds, html_sites, keywords
+    return sources, keywords
 
 # ---------------------------
 # Dedupe
@@ -174,6 +177,7 @@ unsplash = UnsplashClient(UNSPLASH_KEY)
 def extract_listing_generic(html: str, base_url: str):
     soup = BeautifulSoup(html, "lxml")
     items = []
+    # Thử các khối article phổ biến
     for art in soup.select("article"):
         a = art.select_one("a[href]")
         if not a:
@@ -186,6 +190,7 @@ def extract_listing_generic(html: str, base_url: str):
         summary = clean_text(summary_el.get_text()) if summary_el else ""
         if title and link:
             items.append({"title": title, "link": link, "summary": summary})
+    # Fallback: tiêu đề nằm trong h2/h3
     if not items:
         for h in soup.select("h2 a[href], h3 a[href]"):
             title = clean_text(h.get_text())
@@ -193,12 +198,20 @@ def extract_listing_generic(html: str, base_url: str):
             link = href if href.startswith("http") else urljoin(base_url, href)
             if title and link:
                 items.append({"title": title, "link": link, "summary": ""})
+    # VnExpress mục AI có thể dùng thẻ a trong list, thêm fallback:
+    if not items:
+        for a in soup.select("a[href]"):
+            txt = clean_text(a.get_text())
+            href = a.get("href", "")
+            if txt and href and "/ai" in href:
+                link = href if href.startswith("http") else urljoin(base_url, href)
+                items.append({"title": txt, "link": link, "summary": ""})
     return items
 
 # ---------------------------
 # Trích ảnh từ bài
 # ---------------------------
-def find_og_image(html: str) -> str or None:
+def find_og_image(html: str) -> str | None:
     soup = BeautifulSoup(html, "lxml")
     og = soup.find("meta", property="og:image")
     if og and og.get("content"):
@@ -215,9 +228,6 @@ def find_og_image(html: str) -> str or None:
 # Trích nội dung đầy đủ (siêu mạnh)
 # ---------------------------
 def extract_full_with_newspaper(url: str, language: str = "vi"):
-    """
-    Ưu tiên newspaper3k vì tách noise rất tốt.
-    """
     art = Article(url, language=language)
     art.download()
     art.parse()
@@ -225,16 +235,16 @@ def extract_full_with_newspaper(url: str, language: str = "vi"):
     text = clean_text(art.text or "")
     return title, text
 
-# Domain-specific selectors (fallback khi newspaper3k không lấy được)
 DOMAIN_SELECTORS = {
     # VnExpress
     "vnexpress.net": [
-        "article.fck_detail",      # nội dung chính
-        "div.sidebar_1",           # fallback
+        "article.fck_detail",
+        "div.sidebar_1",
+        "article",
     ],
     # Tuổi Trẻ
     "tuoitre.vn": [
-        "div.detail-content.afcbc-body",  # nội dung chính
+        "div.detail-content.afcbc-body",
         "div#main-detail",
         "article",
     ],
@@ -246,7 +256,7 @@ DOMAIN_SELECTORS = {
     ],
     # Dân Trí
     "dantri.com.vn": [
-        "div.singular-content",    # nội dung chính
+        "div.singular-content",
         "div.article__body",
         "article",
     ],
@@ -269,19 +279,17 @@ DOMAIN_SELECTORS = {
 }
 
 def extract_full_with_bs(url: str, html: str) -> tuple[str, str]:
-    """
-    Fallback BeautifulSoup: thử selector theo domain, nếu vẫn không có,
-    gom toàn bộ <p> có nội dung.
-    """
     soup = BeautifulSoup(html, "lxml")
     domain = host_of(url)
     selectors = DOMAIN_SELECTORS.get(domain, [])
-    # Tìm tiêu đề
+
+    # Tiêu đề
     title = ""
     t = soup.find("h1")
     if t:
         title = clean_text(t.get_text())
-    # Theo selector
+
+    # Theo selector đặc thù
     for sel in selectors:
         node = soup.select_one(sel)
         if node:
@@ -289,13 +297,15 @@ def extract_full_with_bs(url: str, html: str) -> tuple[str, str]:
             text = " ".join([p for p in paragraphs if p])
             if len(text) > 120:
                 return title, text
-    # Fallback gom <article>
+
+    # Fallback <article>
     art = soup.find("article")
     if art:
         paragraphs = [clean_text(p.get_text()) for p in art.select("p")]
         text = " ".join([p for p in paragraphs if p])
         if len(text) > 100:
             return title, text
+
     # Fallback gom toàn bộ <p>
     paragraphs = [clean_text(p.get_text()) for p in soup.find_all("p")]
     text = " ".join([p for p in paragraphs if p])
@@ -309,7 +319,6 @@ def extract_full_text(url: str) -> tuple[str, str, str]:
     try:
         title, text = extract_full_with_newspaper(url, language=LANG)
         if len(text) >= 200:
-            # Lấy HTML để tìm ảnh
             try:
                 r = http_get(url, timeout=12)
                 img = find_og_image(r.text)
@@ -330,69 +339,84 @@ def extract_full_text(url: str) -> tuple[str, str, str]:
         return "", "", None
 
 # ---------------------------
-# RSS & HTML listing
+# Phát hiện nguồn: RSS hay HTML
 # ---------------------------
-def iter_feed_entries(feed_url: str):
-    fp = feedparser.parse(feed_url)
-    for e in fp.entries:
-        title = e.get("title", "").strip()
-        link = e.get("link", "").strip()
-        summary = e.get("summary", "") or e.get("description", "")
-        published = e.get("published", "") or e.get("updated", "")
-        yield {
-            "title": title,
-            "link": link,
-            "summary": clean_text(BeautifulSoup(summary, "lxml").get_text()),
-            "published": published,
-            "source": feed_url,
-        }
+def detect_rss_entries(url: str):
+    try:
+        feed = feedparser.parse(url)
+        # Nếu có entries hợp lệ, coi là RSS
+        if getattr(feed, "entries", None) and len(feed.entries) > 0 and not feed.bozo:
+            return feed.entries
+        # Một số RSS có bozo nhưng vẫn có entries dùng được
+        if getattr(feed, "entries", None) and len(feed.entries) > 0:
+            return feed.entries
+    except Exception as e:
+        log.info(f"Không parse RSS được ({url}): {e}")
+    return None
 
-def gather_from_feeds(feeds: list[str], keywords: list[str]) -> list[dict]:
-    items = []
-    for f in feeds:
-        try:
-            for e in iter_feed_entries(f):
-                t = (e["title"] or "").lower()
-                s = (e["summary"] or "").lower()
-                if keywords and not any(k in (t + " " + s) for k in keywords):
-                    continue
-                items.append(e)
-        except Exception as ex:
-            log.warning(f"RSS lỗi {f}: {ex}")
-        time.sleep(REQUEST_DELAY)
-    # Sắp xếp theo thời gian xuất bản
-    def parse_dt(x):
-        try:
-            return dateparser.parse(x.get("published") or "")
-        except Exception:
-            return datetime.min.replace(tzinfo=timezone.utc)
-    items.sort(key=parse_dt, reverse=True)
-    return items
+def fetch_listing_html(url: str):
+    # Dùng HTML để trích danh sách liên kết
+    r = http_get(url, timeout=15)
+    soup = BeautifulSoup(r.text, "lxml")
+    return soup, r.text
 
-def gather_from_html(listings: list[dict], keywords: list[str]) -> list[dict]:
+def gather_candidates_from_source(src_url: str, keywords: list[str]) -> list[dict]:
+    """
+    Trả về danh sách item: {title, link, summary, published, source}
+    Tự nhận diện RSS/HTML.
+    """
     items = []
-    for site in listings:
-        url = site.get("url")
-        base = site.get("base") or url
-        try:
-            r = http_get(url, timeout=12)
-            lst = extract_listing_generic(r.text, base_url=base)
-            for it in lst[:20]:
-                t = (it.get("title") or "").lower()
-                s = (it.get("summary") or "").lower()
-                if keywords and not any(k in (t + " " + s) for k in keywords):
-                    continue
-                items.append({
-                    "title": it.get("title"),
-                    "link": it.get("link"),
-                    "summary": it.get("summary", ""),
-                    "published": "",
-                    "source": url
-                })
-        except Exception as ex:
-            log.warning(f"HTML listing lỗi {url}: {ex}")
+    # 1) Thử RSS
+    rss_entries = detect_rss_entries(src_url)
+    if rss_entries is not None:
+        for e in rss_entries:
+            title = (e.get("title") or "").strip()
+            link = (e.get("link") or "").strip()
+            if not link:
+                continue
+            summary = e.get("summary", "") or e.get("description", "")
+            published = e.get("published", "") or e.get("updated", "")
+            t = title.lower()
+            s = clean_text(BeautifulSoup(summary, "lxml").get_text()).lower()
+            if keywords and not any(k in (t + " " + s) for k in keywords):
+                continue
+            items.append({
+                "title": title,
+                "link": link,
+                "summary": clean_text(BeautifulSoup(summary, "lxml").get_text()),
+                "published": published,
+                "source": src_url
+            })
         time.sleep(REQUEST_DELAY)
-    return items
+        return items
+
+    # 2) HTML listing
+    try:
+        soup, raw = fetch_listing_html(src_url)
+        base = src_url
+        lst = extract_listing_generic(raw, base_url=base)
+        for it in lst[:25]:
+            title = it.get("title") or ""
+            link = it.get("link") or ""
+            if not link:
+                continue
+            summary = it.get("summary") or ""
+            t = title.lower()
+            s = summary.lower()
+            if keywords and not any(k in (t + " " + s) for k in keywords):
+                continue
+            items.append({
+                "title": title,
+                "link": link,
+                "summary": clean_text(summary),
+                "published": "",
+                "source": src_url
+            })
+        time.sleep(REQUEST_DELAY)
+        return items
+    except Exception as ex:
+        log.warning(f"HTML listing lỗi {src_url}: {ex}")
+        return items
 
 # ---------------------------
 # Tóm tắt & caption
@@ -424,15 +448,11 @@ def build_caption(title: str, summary: str, source_url: str) -> str:
     return "\n".join(parts)
 
 # ---------------------------
-# Đăng Facebook
+# FB Posting
 # ---------------------------
 def fb_post_link(message: str, link: str):
     url = f"{GRAPH_BASE}/{PAGE_ID}/feed"
-    payload = {
-        "message": message,
-        "link": link,
-        "access_token": PAGE_TOKEN
-    }
+    payload = {"message": message, "link": link, "access_token": PAGE_TOKEN}
     r = requests.post(url, data=payload, timeout=30)
     if r.status_code >= 400:
         raise RuntimeError(f"FB feed error: {r.status_code} {r.text}")
@@ -440,16 +460,62 @@ def fb_post_link(message: str, link: str):
 
 def fb_post_photo(caption: str, image_url: str):
     url = f"{GRAPH_BASE}/{PAGE_ID}/photos"
-    payload = {
-        "caption": caption,
-        "url": image_url,
-        "published": "true",
-        "access_token": PAGE_TOKEN
-    }
+    payload = {"caption": caption, "url": image_url, "published": "true", "access_token": PAGE_TOKEN}
     r = requests.post(url, data=payload, timeout=40)
     if r.status_code >= 400:
         raise RuntimeError(f"FB photos error: {r.status_code} {r.text}")
     return r.json()
+
+# ---------------------------
+# Bộ lọc thời gian (<=24h)
+# ---------------------------
+def extract_published_from_html(html: str) -> datetime | None:
+    soup = BeautifulSoup(html, "lxml")
+    meta_props = [
+        ("meta", {"property": "article:published_time"}),
+        ("meta", {"name": "article:published_time"}),
+        ("meta", {"property": "og:published_time"}),
+        ("meta", {"name": "pubdate"}),
+        ("time", {}),
+    ]
+    for tag, attrs in meta_props:
+        if tag == "time":
+            t = soup.find("time")
+            if t:
+                txt = t.get("datetime") or t.get_text()
+                try:
+                    return dateparser.parse(txt)
+                except:
+                    continue
+        else:
+            m = soup.find(tag, attrs=attrs)
+            if m and m.get("content"):
+                try:
+                    return dateparser.parse(m.get("content"))
+                except:
+                    continue
+    return None
+
+def within_24h(published_str: str, url: str) -> bool:
+    if published_str:
+        try:
+            dt = dateparser.parse(published_str)
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt) <= timedelta(days=1)
+        except:
+            pass
+    # Fallback: lấy từ HTML
+    try:
+        r = http_get(url, timeout=10)
+        dt = extract_published_from_html(r.text)
+        if dt:
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt) <= timedelta(days=1)
+    except Exception:
+        pass
+    return False
 
 # ---------------------------
 # Quy trình chính
@@ -458,19 +524,32 @@ def run_once(max_posts: int):
     if not PAGE_ID or not PAGE_TOKEN:
         raise SystemExit("Thiếu FACEBOOK_PAGE_ID hoặc FACEBOOK_PAGE_ACCESS_TOKEN trong .env")
 
-    feeds, html_sites, keywords = load_sources(SOURCES_FILE)
+    sources, keywords = load_sources(SOURCES_FILE)
     posted = load_posted(POSTED_FILE)
 
-    rss_items = gather_from_feeds(feeds, keywords)
-    html_items = gather_from_html(html_sites, keywords) if html_sites else []
+    # Gom tất cả candidates từ từng nguồn (tự nhận diện RSS/HTML)
+    candidates = []
+    for src in sources:
+        items = gather_candidates_from_source(src, keywords)
+        if not items:
+            log.info(f"Không lấy được item nào từ nguồn: {src}")
+        candidates.extend(items)
 
-    # Gộp theo link (khử trùng lặp giữa RSS & HTML listing)
+    # Sắp xếp theo published (mới -> cũ)
+    def parse_dt(x):
+        try:
+            return dateparser.parse(x.get("published") or "") or datetime.min.replace(tzinfo=timezone.utc)
+        except Exception:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    candidates.sort(key=parse_dt, reverse=True)
+
+    # Khử trùng lặp theo link
     unique = {}
-    for it in rss_items + html_items:
+    for it in candidates:
         link = it.get("link")
-        if not link:
-            continue
-        unique.setdefault(link, it)
+        if link:
+            unique.setdefault(link, it)
     items = list(unique.values())
 
     per_source_count: dict[str, int] = {}
@@ -490,23 +569,25 @@ def run_once(max_posts: int):
         if per_source_count.get(src, 0) >= MAX_POSTS_PER_SOURCE:
             continue
 
+        # Lọc bài trong 24h
+        if not within_24h(it.get("published", ""), url):
+            log.info(f"Bỏ qua bài cũ (>24h): {url}")
+            continue
+
         # Lấy full bài
         title_from_feed = it.get("title") or ""
         title, fulltext, img_from_article = extract_full_text(url)
-
-        # Ưu tiên tiêu đề từ bài; fallback tiêu đề từ RSS
         title = title or title_from_feed or "Bài viết"
 
-        # Nếu không lấy được nội dung, fallback từ summary feed
         if not fulltext:
             fulltext = it.get("summary", "")
 
-        # Build caption
+        # Caption
         text_for_summary = fulltext if USE_FULLTEXT_FOR_SUMMARY else (it.get("summary") or fulltext)
         summary = summarize(text_for_summary, SUMMARY_MAX_LEN)
         caption = build_caption(title, summary, url)
 
-        # Ảnh: ưu tiên ảnh bài, rồi Unsplash
+        # Ảnh
         image_url = None
         if img_from_article and img_from_article.startswith("http"):
             image_url = img_from_article
@@ -526,8 +607,7 @@ def run_once(max_posts: int):
             save_posted(posted, POSTED_FILE)
             per_source_count[src] = per_source_count.get(src, 0) + 1
             posted_count += 1
-
-            time.sleep(1.5)
+            time.sleep(1.2)
         except Exception as e:
             log.error(f"Đăng thất bại: {url} | {e}")
 
@@ -537,11 +617,11 @@ def run_once(max_posts: int):
 # CLI
 # ---------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Auto Facebook Poster — mạnh")
+    parser = argparse.ArgumentParser(description="Auto Facebook Poster — Smart")
     parser.add_argument("--max", type=int, default=MAX_POSTS_PER_RUN, help="Số bài tối đa mỗi lần chạy")
     args = parser.parse_args()
 
-    log.info("Bắt đầu chạy auto_fb_post.py (one-shot).")
+    log.info("Bắt đầu chạy auto_fb_post.py (one-shot, smart sources).")
     run_once(args.max)
     log.info("Kết thúc.")
 
