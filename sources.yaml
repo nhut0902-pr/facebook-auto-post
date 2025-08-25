@@ -1,18 +1,26 @@
 feeds:
   - https://thanhnien.vn/cong-nghe/rss.html
   - https://tuoitre.vn/rss/cong-nghe.rss
-  - https://dantri.com.vn/cong-nghe/ai-internet.htm
-  - https://tuoitre.vn/cong-nghe.htm
+  - https://dantri.com.vn/rss/cong-nghe.rss
   - https://ictnews.vietnamnet.vn/rss/ict.rss
-  - https://genk.vn/rss.chn
-  - https://cafef.vn/thi-truong-cong-nghe.rss
+  - https://genk.vn/rss/home.rss
+  - https://cafef.vn/rss.chn
   - https://baomoi.com/rss/cong-nghe.rss
-  - https://kenh14.vn/cong-nghe.rss
-  - https://zingnews.vn/cong-nghe.rss
+  - https://kenh14.vn/rss.chn
+  - https://zingnews.vn/rss/cong-nghe.rss
   - https://viettimes.vn/rss/cong-nghe.rss
   - https://nld.com.vn/rss/cong-nghe.rss
   - https://vtc.vn/rss/cong-nghe.rss
-  - https://soha.vn/cong-nghe.rss
+  - https://soha.vn/rss/cong-nghe.rss
+
+html_sites:
+  # Nếu muốn crawl danh mục HTML (nơi không có RSS), thêm các entry dạng:
+  - name: dantri_ai
+    url: https://dantri.com.vn/cong-nghe/ai-internet.htm
+    base: https://dantri.com.vn
+  - name: tuoitre_congnghe
+    url: https://tuoitre.vn/cong-nghe.htm
+    base: https://tuoitre.vn
 
 keywords:
   - AI
