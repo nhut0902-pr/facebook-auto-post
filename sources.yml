@@ -1,26 +1,21 @@
-feeds:
+sources:
+  # RSS
+  - https://vnexpress.net/rss/so-hoa.rss
   - https://thanhnien.vn/cong-nghe/rss.html
   - https://tuoitre.vn/rss/cong-nghe.rss
   - https://dantri.com.vn/rss/cong-nghe.rss
   - https://ictnews.vietnamnet.vn/rss/ict.rss
   - https://genk.vn/rss/home.rss
-  - https://cafef.vn/rss.chn
-  - https://baomoi.com/rss/cong-nghe.rss
-  - https://kenh14.vn/rss.chn
   - https://zingnews.vn/rss/cong-nghe.rss
   - https://viettimes.vn/rss/cong-nghe.rss
   - https://nld.com.vn/rss/cong-nghe.rss
   - https://vtc.vn/rss/cong-nghe.rss
-  - https://soha.vn/rss/cong-nghe.rss
+  - https://soha.vn/rss-cong-nghe.rss
 
-html_sites:
-  # Nếu muốn crawl danh mục HTML (nơi không có RSS), thêm các entry dạng:
-  - name: dantri_ai
-    url: https://dantri.com.vn/cong-nghe/ai-internet.htm
-    base: https://dantri.com.vn
-  - name: tuoitre_congnghe
-    url: https://tuoitre.vn/cong-nghe.htm
-    base: https://tuoitre.vn
+  # HTML (tự phát hiện)
+  - https://vnexpress.net/khoa-hoc-cong-nghe/ai
+  - https://dantri.com.vn/cong-nghe/ai-internet.htm
+  - https://tuoitre.vn/cong-nghe.htm
 
 keywords:
   - AI
@@ -28,3 +23,5 @@ keywords:
   - công nghệ
   - robot
   - machine learning
+  - deep learning
+  - chip
