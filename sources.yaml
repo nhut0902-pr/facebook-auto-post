@@ -1,12 +1,17 @@
 feeds:
-  # Bạn có thể thay/đổi cho phù hợp lĩnh vực
   - https://vnexpress.net/rss/so-hoa.rss
   - https://thanhnien.vn/cong-nghe/rss.html
   - https://tuoitre.vn/rss/cong-nghe.rss
-  - https://dantri.com.vn/cong-nghe/ai-internet.htm
-  - https://tuoitre.vn/cong-nghe.htm
+  - https://dantri.com.vn/rss/cong-nghe.rss
+
+html_sites:
+  # Danh mục HTML (không phải RSS) – sẽ crawl nhẹ nhàng
+  - name: dantri_ai_internet
+    url: https://dantri.com.vn/cong-nghe/ai-internet.htm
+  - name: tuoitre_congnghe
+    url: https://tuoitre.vn/cong-nghe.htm
+
 keywords:
-  # Lọc sơ bộ tiêu đề/bài viết (để tránh tin không liên quan)
   - AI
   - trí tuệ nhân tạo
   - công nghệ
