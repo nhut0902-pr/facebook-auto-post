@@ -11,6 +11,7 @@ sources:
   - https://nld.com.vn/rss/cong-nghe.rss
   - https://vtc.vn/rss/cong-nghe.rss
   - https://soha.vn/rss-cong-nghe.rss
+  - https://vatvostudio.vn/category/artificial-intelligence.rss
 
   # HTML (tự phát hiện)
   - https://vnexpress.net/khoa-hoc-cong-nghe/ai
